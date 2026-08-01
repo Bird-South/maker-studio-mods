@@ -12,6 +12,18 @@ When a major bump happens, this file gets a section with the new shape and a lin
 
 ## Additions since 1.0.0
 
+- **`ctx.theme`** (`ThemeCtx`). Register editor themes: `register({ id, name, base, vars?, css?, canvas? })`,
+  `apply(id | null)`, `current()`, `list()`, and `assetUrl(relPath)` for turning a file in your mod
+  folder into a `data:` URI. One theme is active at a time, chosen in **View → Theme** and
+  remembered between sessions; a theme's rules are scoped to it, so registering one changes nothing
+  until it is applied, and unloading your mod removes it. `canvas.image` is painted by the map
+  renderer itself, under the map — no transparent `--canvas-bg` and no z-ordered overlay. Stable
+  hooks for the CSS: `data-ms-part="menubar|toolbar|statusbar|panel-header|dialog|canvas"`.
+  A theme declares `dark` / `light` variants to follow the editor's Dark Mode toggle (one entry in
+  View → Theme, two looks); declaring only one of them — or neither — forces that scheme and locks
+  the toggle while the theme is active.
+- **`ctx.fs.readModFileBytes(relPath)`**. Raw bytes from your own mod folder, for images and fonts.
+
 - **Mod command tabs** (`ModCommandDef`, `ctx.events.registerCommand`). `page` is now
   functional: it titles the command's own tab in the event-command picker, and commands
   sharing the same `page` string collect under one named tab (omit it and they group under
@@ -19,6 +31,18 @@ When a major bump happens, this file gets a section with the new shape and a lin
   beneath that tab while it is active — among commands sharing a page, the first one that
   sets it wins. Additive: existing mods keep working; a command with no `page` simply gets a
   tab named after its mod. See [api-reference.md](./api-reference.md) (`events.registerCommand`).
+
+- **Tileset Editor glyph styling** (`ctx.tileset`). `registerPriority` takes an optional
+  `color` (any CSS colour) that paints that level's marker on the tile and its chip in the
+  Priority dropdown; without one the built-in five-colour cycle continues, so id 6 still
+  reuses id 1's colour. New **`setGlyphStyle(style)`** restyles every marker the Tileset
+  Editor draws — `passageOpen` / `passageBlocked` / `passagePartial`, `bush`, `counter`,
+  `terrain`, the cycling `priority` list, `neutral` (priority 0 and flags-off), plus
+  `shadowColor`, `shadowBlur` and `strokeWidth` (the last two as fractions of the tile cell
+  size; `shadowBlur: 0` turns the shadow off). Every field is optional and merged over the
+  defaults, later registrations win per field, and the returned `Disposable` restores the
+  defaults on unload. Additive: mods that never call it see no change. See
+  [api-reference.md](./api-reference.md) (`tileset`).
 
 ## Fixes since 1.0.0
 

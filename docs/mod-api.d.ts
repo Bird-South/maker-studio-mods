@@ -793,8 +793,51 @@ export interface TilesetCtx {
    * Editor's **Priority** dropdown. `id` is the integer written to
    * `@priorities`; built-in ids are 0–5 (0 = ground, 1–5 = tiles overhead), so
    * use 6+ for custom priorities. Duplicate ids ignored. Auto-removed on unload.
+   *
+   * `color` (any CSS colour) paints that level's marker on the tile and its
+   * chip in the picker. Without one the built-in five-colour cycle continues,
+   * so id 6 reuses id 1's colour.
    */
-  registerPriority?(def: { id: number; name: string }): Disposable;
+  registerPriority?(def: { id: number; name: string; color?: string }): Disposable;
+
+  /**
+   * Restyle the markers the Tileset Editor draws over each tile — the passage
+   * dot/cross, the priority star, the bush "B", the terrain number.
+   *
+   * Every field is optional and merged over the defaults, so a mod that only
+   * wants different priority colours passes only `priority`. When several mods
+   * set a style, later registrations win per field. Auto-removed on unload.
+   *
+   * ```js
+   * ctx.tileset.setGlyphStyle({
+   *   priority: ["#ffcc00", "#ff8a3d", "#ff5c8a"], // cycles past the end
+   *   passageBlocked: "#ff0000",
+   *   shadowBlur: 0,                               // no drop shadow
+   * });
+   * ```
+   */
+  setGlyphStyle?(style: Partial<TilesetGlyphStyle>): Disposable;
+}
+
+/** Colours and stroke/shadow weights of the Tileset Editor's tile markers. */
+export interface TilesetGlyphStyle {
+  /** Passage: fully open / fully blocked / some directions blocked. */
+  passageOpen: string;
+  passageBlocked: string;
+  passagePartial: string;
+  bush: string;
+  counter: string;
+  terrain: string;
+  /** Priority levels 1..n. Cycles when a level runs past the end of the list. */
+  priority: string[];
+  /** "Nothing set here": priority 0, bush/counter off, terrain 0. */
+  neutral: string;
+  /** Drop shadow hugging the marker's own outline. */
+  shadowColor: string;
+  /** Shadow blur as a fraction of the tile cell size. 0 disables it. */
+  shadowBlur: number;
+  /** Marker stroke width as a fraction of the tile cell size. */
+  strokeWidth: number;
 }
 
 export interface ShadowCtx {
@@ -1042,6 +1085,8 @@ export interface BusCtx {
 export interface FsCtx {
   /** Read a file inside the mod's own folder. */
   readModFile(relPath: string): Promise<string>;
+  /** Read a file inside the mod's own folder as raw bytes (images, fonts). */
+  readModFileBytes(relPath: string): Promise<Uint8Array>;
   /** Write a file inside the mod's own folder. Permission: fs.mod. */
   writeModFile(relPath: string, content: string): Promise<void>;
   /** Read a project asset by path relative to gameRoot. Permission: fs.project. */
@@ -1518,6 +1563,87 @@ export interface PluginsCtx {
 // ModContext — the root facade passed to activate(ctx).
 // ============================================================================
 
+/**
+ * A theme is CSS variables layered over one of the two built-in bases, plus
+ * optional free-form CSS. Rules are scoped to the theme, so registering one
+ * changes nothing until it is applied, and unloading the mod removes it.
+ *
+ * Beyond the variables, the app tags stable regions with `data-ms-part`
+ * (`toolbar`, `menubar`, `statusbar`, `panel-header`, `dialog`, `canvas`) — a
+ * theme can select those directly instead of app class names.
+ */
+/** The half of a theme that changes with the editor's Dark Mode toggle. */
+export interface ModThemeVariant {
+  vars?: Record<string, string>;
+  css?: string;
+  canvas?: ModThemeDef["canvas"];
+}
+
+export interface ModThemeDef {
+  /** Unique across all mods; namespace it with your mod id. */
+  id: string;
+  /** Shown in View > Theme. */
+  name: string;
+  /**
+   * Built-in palette everything not overridden falls back to. A theme that also
+   * declares `dark` / `light` follows the Dark Mode toggle; one that doesn't
+   * moves the toggle to `base` when it is applied.
+   */
+  base: "dark" | "light";
+  /** CSS custom properties, with or without the leading `--`. */
+  vars?: Record<string, string>;
+  /** Extra CSS. A block with no selector of its own is folded into the theme's
+   *  own `:root` scope. */
+  css?: string;
+  /**
+   * Wallpaper for the map canvas. The renderer paints it itself, over the
+   * cleared canvas and under the map — a theme does not have to make
+   * `--canvas-bg` transparent (which stops the canvas clearing and smears on
+   * pan) or register a z-ordered overlay to get a background behind the map.
+   */
+  canvas?: {
+    /** Image URL or data URI. `ctx.theme.assetUrl()` turns a mod file into one. */
+    image?: string;
+    /** `cover` scales to fill; `tile` repeats at natural size. Default `cover`. */
+    fit?: "cover" | "tile";
+    /** 0-1, applied to the image only. Default 1. */
+    opacity?: number;
+  };
+  /**
+   * Per-scheme overrides on top of `vars` / `css` / `canvas`. What you declare
+   * decides how the theme answers the editor's Dark Mode toggle:
+   *
+   * | Declared | Result |
+   * |----------|--------|
+   * | `dark` **and** `light` | one entry, two looks — follows the toggle |
+   * | only one of them | that scheme is forced and the toggle is locked |
+   * | neither | `base` is forced, same lock |
+   *
+   * A theme that only works in one scheme should say so, rather than let the
+   * user flip to a half-styled counterpart.
+   */
+  dark?: ModThemeVariant;
+  light?: ModThemeVariant;
+}
+
+export interface ThemeCtx {
+  /** Add a theme to View > Theme. Returns a disposer; also removed on unload. */
+  register(theme: ModThemeDef): () => void;
+  /** Switch to a registered theme, or null for the built-in dark/light. */
+  apply(id: string | null): void;
+  /** Currently applied mod theme id, or null when a built-in one is active. */
+  current(): string | null;
+  /** Every registered mod theme, this mod's included. */
+  list(): ModThemeDef[];
+  /**
+   * A file inside the mod folder as a `data:` URI, usable straight from theme
+   * CSS or `canvas.image`. Themes cannot reference mod files by path — the app
+   * page has no access to the project folder — so this is how a wallpaper or a
+   * font gets in without hand-encoding it into the source.
+   */
+  assetUrl(relativePath: string): Promise<string>;
+}
+
 export interface ModContext {
   /** API version this context implements. */
   readonly apiVersion: string;
@@ -1538,6 +1664,8 @@ export interface ModContext {
   menu: MenuCtx;
   commands: CommandsCtx;
   ui: UiCtx;
+  /** Editor themes contributed by this mod. */
+  theme: ThemeCtx;
   bus: BusCtx;
   fs: FsCtx;
   storage: StorageCtx;

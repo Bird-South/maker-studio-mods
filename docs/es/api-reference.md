@@ -186,7 +186,7 @@ tileset.resolveTileProperties(tileId, tilesetId?): { passage, priority, terrainT
 
 ```ts
 tileset.registerTerrainTag({ id, name }): Disposable
-tileset.registerPriority({ id, name }): Disposable
+tileset.registerPriority({ id, name, color? }): Disposable
 ```
 
 `registerTerrainTag` / `registerPriority` añaden una entrada con nombre a los desplegables **Terrain
@@ -197,11 +197,55 @@ priorities (0 = suelo, 1–5 = tiles por encima), de modo que usa **18+** / **6+
 personalizadas y no pisarlos. Los ids duplicados se ignoran (gana el primer registro). Ambos
 devuelven un `Disposable` y se eliminan automáticamente al descargar el mod.
 
+El modo Priority va coloreado por nivel: el editor recorre una lista de cinco colores (amarillo /
+naranja / rosa / morado / azul) desde la prioridad 1 en adelante, así que una priority registrada por
+encima de 5 continúa el ciclo — el id 6 reutiliza el color del 1, y así sucesivamente. Pasa
+**`color`** (cualquier color CSS) para darle a tu nivel uno propio. En ambos casos el color pinta la
+marca dibujada sobre el tile y el cuadrito junto al valor en el desplegable. Los terrain tags no
+tienen color.
+
 El editor solo aporta la etiqueta del picker + el rango seleccionable — **no hay runtime dispatcher**.
 Para darle a un tag un comportamiento en el juego, léelo de vuelta en tus scripts de juego
 (`$game_map.terrain_tag(x, y)` — un Integer plano en RMXP/BES/LBDS; resuelto a través de
 `PBTerrain` / `GameData::TerrainTag` en Pokemon Essentials) y ramifica según el valor. Consulta el
 mod de ejemplo `custom-tile-properties`.
+
+```ts
+tileset.setGlyphStyle(style: Partial<TilesetGlyphStyle>): Disposable
+```
+
+`setGlyphStyle` recolorea las marcas que el Tileset Editor dibuja sobre cada tile — el punto/aspa de
+passage, la estrella de prioridad, la **B** de bush, el número de terrain tag. Todos los campos son
+opcionales y se fusionan sobre los valores por defecto, así que un mod que solo quiere otros colores
+de prioridad pasa únicamente `priority`:
+
+```js
+ctx.tileset.setGlyphStyle({
+  priority: ["#ffcc00", "#ff8a3d", "#ff5c8a"], // niveles 1..n, cicla al pasarse del final
+  passageBlocked: "#ff0000",
+  shadowBlur: 0,                               // sin sombra
+});
+```
+
+| Campo | Tipo | Por defecto | Marca |
+|---|---|---|---|
+| `passageOpen` | color CSS | `#66ff66` | passage totalmente abierto |
+| `passageBlocked` | color CSS | `#ff4444` | passage totalmente bloqueado |
+| `passagePartial` | color CSS | `#ffcc00` | algunas direcciones bloqueadas |
+| `bush` | color CSS | `#66ff66` | flag de bush |
+| `counter` | color CSS | `#66aaff` | flag de counter |
+| `terrain` | color CSS | `#ff66aa` | número de terrain tag |
+| `priority` | color CSS[] | `["#ffcc00","#ff8a3d","#ff5c8a","#b48cff","#4fc3f7"]` | niveles de prioridad 1..n — **cicla** al pasarse del final de la lista |
+| `neutral` | color CSS | `rgba(255,255,255,0.5)` | «aquí no hay nada»: prioridad 0, bush/counter apagados, terrain 0 |
+| `shadowColor` | color CSS | `rgba(0,0,0,0.9)` | sombra que sigue el contorno de la marca |
+| `shadowBlur` | número | `1/11` | desenfoque de la sombra como **fracción del tamaño de celda** del tile; `0` la desactiva |
+| `strokeWidth` | número | `1/14` | grosor del trazo de la marca como fracción del tamaño de celda |
+
+Una priority registrada con su propio `color` sigue ganando a la lista `priority` para ese nivel
+concreto. Una lista `priority` vacía se ignora (el ciclo necesita al menos un color). Cuando varios
+mods definen un estilo, **gana el último registro campo a campo**, así que dos mods pueden ocuparse
+cada uno de una parte del aspecto. Devuelve un `Disposable` y se elimina automáticamente al descargar
+el mod, restaurando los valores por defecto.
 
 ---
 
@@ -1542,3 +1586,80 @@ ctx.stats.onStatsChanged((global, project) => {
   // Se dispara ~cada 60s con snapshots frescas
 });
 ```
+
+## `ctx.theme` — temas del editor
+
+```js
+export async function activate(ctx) {
+  const fondo = await ctx.theme.assetUrl("bg.png");
+
+  ctx.theme.register({
+    id: "com.ejemplo.dusk",
+    name: "Dusk",
+    base: "dark",
+    vars: {
+      "--accent": "#ffc50b",
+      "--bg-primary": "#0e0e0f",
+      "--bg-secondary": "#141414",
+    },
+    css: `
+      [data-ms-part="toolbar"] { border-bottom: 1px solid var(--accent); }
+      [data-ms-part="dialog"]  { border-radius: 14px; }
+    `,
+    canvas: { image: fondo, fit: "cover", opacity: 0.9 },
+  });
+}
+```
+
+| Miembro | Para qué |
+|---------|----------|
+| `register(tema)` | Lo añade a **Ver → Tema**. Devuelve un disposer; también se quita al descargar el mod |
+| `apply(id \| null)` | Cambia de tema, o `null` para el dark/light integrado |
+| `current()` | Id del tema de mod activo, o `null` |
+| `list()` | Todos los temas registrados, incluidos los de otros mods |
+| `assetUrl(ruta)` | Un fichero de tu carpeta como `data:` URI — para `canvas.image`, `background-image`, `@font-face` |
+
+**Cómo se aplica.** Se añade `data-ms-theme="<tu id>"` a la raíz y **cada regla que aportas se
+reescribe para colgar de él** — tu `css` incluido, así que un tema registrado no cambia nada hasta
+que el usuario lo elige. Lo que no sobrescribas sigue resolviéndose contra `base`. No necesitas
+`!important` ni reañadir una etiqueta `<style>`: la hoja de estilos y su orden los gestiona el
+editor.
+
+Escribe el `css` como si aplicara a toda la app (`[data-ms-part="toolbar"] { … }`); el acotado lo
+pone el editor. Una regla dirigida a `:root` o `html` pasa a ser el propio ámbito del tema, se entra
+en `@media`/`@supports`, y `@keyframes`/`@font-face` se dejan intactos.
+
+**Zonas con nombre.** Estiliza mediante `data-ms-part` en vez de nombres de clase internos, que no
+son API y cambian: `menubar`, `toolbar`, `statusbar`, `panel-header`, `dialog`, `canvas`.
+
+**El canvas del mapa.** Es un `<canvas>`, así que el CSS no puede entrar dentro. Dale una imagen a
+`canvas.image` y el render la pinta sobre el canvas ya limpiado y por debajo del mapa. No lo intentes
+poniendo `--canvas-bg` transparente: entonces el canvas deja de limpiarse entre frames y el mapa
+deja estelas al moverlo.
+
+**Claro, oscuro o ambos.** Lo que declares decide cómo responde el tema al interruptor **Modo
+oscuro** del editor:
+
+| Declarado | Resultado |
+|-----------|-----------|
+| `dark` **y** `light` | Una entrada en la lista, dos aspectos — sigue el interruptor |
+| solo `dark` (o solo `light`) | Ese esquema se fuerza y el interruptor queda **bloqueado** mientras el tema esté activo |
+| ninguno | Se fuerza `base`, con el mismo bloqueo |
+
+```js
+ctx.theme.register({
+  id: "com.ejemplo.dusk",
+  name: "Dusk",
+  base: "dark",                                   // paleta detrás de lo que no definas
+  vars: { "--radius": "10px" },                   // en ambos esquemas
+  dark:  { vars: { "--accent": "#61afef" } },
+  light: { vars: { "--accent": "#4078f2" } },
+});
+```
+
+Un tema bloqueado mueve el ajuste de Modo oscuro en vez de pelearse con él, y la entrada del menú
+pasa a *Modo oscuro (lo fija el tema)* y se deshabilita — así el interruptor nunca parece roto. La
+preferencia del usuario no se toca y vuelve al elegir otro tema.
+
+**Solo hay un tema activo**, así que dos mods de temas ya no pelean por la cascada — el usuario elige
+uno en Ver → Tema.

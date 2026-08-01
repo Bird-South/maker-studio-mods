@@ -100,9 +100,20 @@ const props = ctx.tileset.getTileProperties(tilesetId, tileId);
 // Aparecen (con nombre) en los desplegables Terrain Tag / Priority del editor de tilesets.
 // Ids integrados: terrain tags 0-17, prioridades 0-5 — usa 18+ / 6+ para personalizados.
 ctx.tileset.registerTerrainTag({ id: 18, name: "Lava" });
-ctx.tileset.registerPriority({ id: 6, name: "Above 6" });
+ctx.tileset.registerPriority({ id: 6, name: "Above 6", color: "#00e5ff" }); // color opcional
 // El id elegido se escribe literalmente en @terrain_tags / @priorities. Sin dispatcher
 // de runtime — léelo en el juego vía $game_map.terrain_tag(x, y) y ramifica según él.
+
+// Recolorea las marcas del Tileset Editor (todos los campos opcionales, fusionados
+// sobre los valores por defecto; gana el último mod campo a campo; se quita al descargar):
+ctx.tileset.setGlyphStyle({
+  priority: ["#ffcc00", "#ff8a3d", "#ff5c8a"], // niveles 1..n, cicla al pasarse del final
+  passageOpen: "#66ff66", passageBlocked: "#ff4444", passagePartial: "#ffcc00",
+  bush: "#66ff66", counter: "#66aaff", terrain: "#ff66aa",
+  neutral: "rgba(255,255,255,0.5)",            // prioridad 0 / flags apagados
+  shadowColor: "rgba(0,0,0,0.9)", shadowBlur: 1 / 11, // fracción del tamaño de celda, 0 = sin sombra
+  strokeWidth: 1 / 14,                         // fracción del tamaño de celda
+});
 ```
 
 ## Grupos de capa de fog / panorama / personalizados
@@ -440,3 +451,24 @@ Para dependencias *duras* que deban impedir que tu mod cargue, usa el array `req
 // proyectos v21+: enforcement controla el bloqueo (ver arriba).
 // proyectos v16 (sin carpeta Plugins/): advertencia en consola, el mod carga igual.
 ```
+
+## Temas
+
+```js
+const url = await ctx.theme.assetUrl("bg.png");        // fichero del mod → data: URI
+ctx.theme.register({ id, name, base: "dark", vars, css, canvas: { image: url } });
+ctx.theme.apply(id);                                   // null = dark/light integrado
+ctx.theme.current();                                   // id activo o null
+ctx.theme.list();                                      // todos los temas registrados
+```
+
+```js
+// Ambas variantes: un tema, dos aspectos, sigue el interruptor de Modo oscuro.
+ctx.theme.register({ id, name, base: "dark", dark: { vars: varsOscuro }, light: { vars: varsClaro } });
+// Solo una: ese esquema se fuerza y el interruptor queda bloqueado.
+ctx.theme.register({ id, name, base: "dark", dark: { vars: varsOscuro } });
+```
+
+Acotado a `:root[data-ms-theme="<id>"]` (y `[data-theme="dark|light"]` para una variante); se elige
+en **Ver → Tema**. Estiliza zonas con
+`data-ms-part="menubar|toolbar|statusbar|panel-header|dialog|canvas"`.

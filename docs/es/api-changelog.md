@@ -12,6 +12,20 @@ Cuando hay un salto de versión major, este archivo recibe una sección con la n
 
 ## Adiciones desde 1.0.0
 
+- **`ctx.theme`** (`ThemeCtx`). Registra temas del editor: `register({ id, name, base, vars?, css?, canvas? })`,
+  `apply(id | null)`, `current()`, `list()` y `assetUrl(rutaRelativa)` para convertir un fichero de la
+  carpeta de tu mod en un `data:` URI. Solo hay un tema activo a la vez, se elige en **Ver → Tema** y
+  se recuerda entre sesiones; las reglas de un tema están acotadas a él, así que registrarlo no
+  cambia nada hasta que se aplica, y al descargar tu mod desaparece. `canvas.image` lo pinta el
+  propio render del mapa, por debajo del mapa — sin `--canvas-bg` transparente ni overlays con
+  z-order. Puntos estables para el CSS:
+  `data-ms-part="menubar|toolbar|statusbar|panel-header|dialog|canvas"`.
+  Un tema declara variantes `dark` / `light` para seguir el interruptor de Modo oscuro del editor
+  (una entrada en Ver → Tema, dos aspectos); declarar solo una de ellas — o ninguna — fuerza ese
+  esquema y bloquea el interruptor mientras el tema esté activo.
+- **`ctx.fs.readModFileBytes(rutaRelativa)`**. Bytes en crudo de la carpeta de tu propio mod, para
+  imágenes y fuentes.
+
 - **Pestañas de comandos de mod** (`ModCommandDef`, `ctx.events.registerCommand`). `page` ahora
   es funcional: titula la pestaña propia del comando en el selector de comandos de evento, y los
   comandos que comparten la misma cadena `page` se agrupan en una sola pestaña con nombre (omítelo y
@@ -20,6 +34,19 @@ Cuando hay un salto de versión major, este archivo recibe una sección con la n
   gana el primero que lo define. Aditivo: los mods existentes siguen funcionando; un comando sin
   `page` simplemente obtiene una pestaña con el nombre de su mod. Consulta
   [api-reference.md](api-reference.md) (`events.registerCommand`).
+
+- **Estilo de las marcas del Tileset Editor** (`ctx.tileset`). `registerPriority` acepta un
+  `color` opcional (cualquier color CSS) que pinta la marca de ese nivel sobre el tile y su
+  cuadrito en el desplegable Priority; sin él sigue el ciclo de cinco colores incluido, así que
+  el id 6 continúa reutilizando el color del 1. El nuevo **`setGlyphStyle(style)`** recolorea
+  todas las marcas que dibuja el Tileset Editor — `passageOpen` / `passageBlocked` /
+  `passagePartial`, `bush`, `counter`, `terrain`, la lista cíclica `priority`, `neutral`
+  (prioridad 0 y flags apagados), además de `shadowColor`, `shadowBlur` y `strokeWidth` (estos
+  dos últimos como fracciones del tamaño de celda del tile; `shadowBlur: 0` quita la sombra).
+  Todos los campos son opcionales y se fusionan sobre los valores por defecto, gana el último
+  registro campo a campo, y el `Disposable` devuelto restaura los valores por defecto al
+  descargar el mod. Aditivo: los mods que no lo llamen no notan ningún cambio. Consulta
+  [api-reference.md](api-reference.md) (`tileset`).
 
 ## Arreglos desde 1.0.0
 

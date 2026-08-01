@@ -186,7 +186,7 @@ tileset.resolveTileProperties(tileId, tilesetId?): { passage, priority, terrainT
 
 ```ts
 tileset.registerTerrainTag({ id, name }): Disposable
-tileset.registerPriority({ id, name }): Disposable
+tileset.registerPriority({ id, name, color? }): Disposable
 ```
 
 `registerTerrainTag` / `registerPriority` add a named entry to the Tileset
@@ -198,11 +198,55 @@ overhead), so use **18+** / **6+** for custom entries to avoid clobbering them.
 Duplicate ids are ignored (first registration wins). Both return a `Disposable`
 and are auto-removed when the mod unloads.
 
+Priority mode is colour-coded per level: the editor cycles a five-colour list
+(yellow / orange / pink / purple / blue) for priority 1 and up, so a registered
+priority past 5 continues the cycle — id 6 reuses the colour of 1, and so on.
+Pass **`color`** (any CSS colour) to give your level its own instead. Either way
+the colour paints the marker drawn on the tile and the chip beside the value in
+the dropdown. Terrain tags have no colour.
+
 The editor only contributes the picker label + selectable range — there is **no
 runtime dispatcher**. To give a tag in-game behavior, read it back in your game
 scripts (`$game_map.terrain_tag(x, y)` — a plain Integer in RMXP/BES/LBDS; resolved
 through `PBTerrain` / `GameData::TerrainTag` in Pokemon Essentials) and branch on
 the value. See the `custom-tile-properties` example mod.
+
+```ts
+tileset.setGlyphStyle(style: Partial<TilesetGlyphStyle>): Disposable
+```
+
+`setGlyphStyle` restyles the markers the Tileset Editor draws over each tile —
+the passage dot/cross, the priority star, the bush **B**, the terrain number.
+Every field is optional and merged over the defaults, so a mod that only wants
+different priority colours passes only `priority`:
+
+```js
+ctx.tileset.setGlyphStyle({
+  priority: ["#ffcc00", "#ff8a3d", "#ff5c8a"], // levels 1..n, cycles past the end
+  passageBlocked: "#ff0000",
+  shadowBlur: 0,                               // no drop shadow
+});
+```
+
+| Field | Type | Default | Marks |
+|---|---|---|---|
+| `passageOpen` | CSS colour | `#66ff66` | passage fully open |
+| `passageBlocked` | CSS colour | `#ff4444` | passage fully blocked |
+| `passagePartial` | CSS colour | `#ffcc00` | some directions blocked |
+| `bush` | CSS colour | `#66ff66` | bush flag |
+| `counter` | CSS colour | `#66aaff` | counter flag |
+| `terrain` | CSS colour | `#ff66aa` | terrain tag number |
+| `priority` | CSS colour[] | `["#ffcc00","#ff8a3d","#ff5c8a","#b48cff","#4fc3f7"]` | priority levels 1..n — **cycles** past the end of the list |
+| `neutral` | CSS colour | `rgba(255,255,255,0.5)` | "nothing set here": priority 0, bush/counter off, terrain 0 |
+| `shadowColor` | CSS colour | `rgba(0,0,0,0.9)` | drop shadow hugging the marker's outline |
+| `shadowBlur` | number | `1/11` | shadow blur as a **fraction of the tile cell size**; `0` disables it |
+| `strokeWidth` | number | `1/14` | marker stroke width as a fraction of the cell size |
+
+A priority registered with its own `color` still wins over the `priority` list
+for that one level. An empty `priority` array is ignored (the cycle needs at
+least one colour). When several mods set a style, **later registrations win per
+field**, so two mods can each own a different part of the look. Returns a
+`Disposable` and is auto-removed when the mod unloads, restoring the defaults.
 
 ---
 
@@ -1539,3 +1583,80 @@ ctx.stats.onStatsChanged((global, project) => {
   // Fires ~every 60s with fresh snapshots
 });
 ```
+
+## `ctx.theme` — editor themes
+
+```js
+export async function activate(ctx) {
+  const wallpaper = await ctx.theme.assetUrl("bg.png");
+
+  ctx.theme.register({
+    id: "com.example.dusk",
+    name: "Dusk",
+    base: "dark",
+    vars: {
+      "--accent": "#ffc50b",
+      "--bg-primary": "#0e0e0f",
+      "--bg-secondary": "#141414",
+    },
+    css: `
+      [data-ms-part="toolbar"] { border-bottom: 1px solid var(--accent); }
+      [data-ms-part="dialog"]  { border-radius: 14px; }
+    `,
+    canvas: { image: wallpaper, fit: "cover", opacity: 0.9 },
+  });
+}
+```
+
+| Member | Purpose |
+|--------|---------|
+| `register(theme)` | Adds it to **View → Theme**. Returns a disposer; it is also removed when your mod unloads |
+| `apply(id \| null)` | Switch to a theme, or `null` for the built-in dark/light |
+| `current()` | Active mod theme id, or `null` |
+| `list()` | Every registered theme, including other mods' |
+| `assetUrl(relPath)` | A file in your mod folder as a `data:` URI — use it for `canvas.image`, `background-image`, `@font-face` |
+
+**How a theme is applied.** `data-ms-theme="<your id>"` is added to the root and **every rule you
+supply is rewritten to sit under it** — your `css` included, so a registered theme changes nothing
+until the user picks it. Anything you don't override still resolves against `base`. You do not need
+`!important`, and you do not need to keep re-appending a `<style>` tag: the editor owns the
+stylesheet and its order.
+
+Write `css` as if it applied to the whole app (`[data-ms-part="toolbar"] { … }`); the scope is added
+for you. A rule aimed at `:root` or `html` becomes the theme scope itself, `@media`/`@supports` are
+recursed into, and `@keyframes`/`@font-face` are passed through untouched.
+
+**Named parts.** Style regions through `data-ms-part` rather than internal class names, which are
+not API and do change: `menubar`, `toolbar`, `statusbar`, `panel-header`, `dialog`, `canvas`.
+
+**The map canvas.** It is a `<canvas>`, so CSS cannot reach inside it. Give `canvas.image` an image
+and the renderer paints it over the cleared canvas and under the map. Don't try to do this by making
+`--canvas-bg` transparent: the canvas then stops clearing between frames and the map smears when
+panning.
+
+**Light, dark, or both.** What you declare decides how the theme answers the editor's **Dark Mode**
+toggle:
+
+| Declared | Result |
+|----------|--------|
+| `dark` **and** `light` | One entry in the list, two looks — it follows the toggle |
+| only `dark` (or only `light`) | That scheme is forced and the toggle is **locked** while the theme is active |
+| neither | `base` is forced, same lock |
+
+```js
+ctx.theme.register({
+  id: "com.example.dusk",
+  name: "Dusk",
+  base: "dark",                                   // palette behind whatever you don't set
+  vars: { "--radius": "10px" },                   // both schemes
+  dark:  { vars: { "--accent": "#61afef" } },
+  light: { vars: { "--accent": "#4078f2" } },
+});
+```
+
+A locked theme moves the Dark Mode setting rather than fighting it, and the menu item says
+*Dark Mode (set by theme)* and is disabled — so the switch never looks broken. The user's own
+preference is untouched and comes back when they pick another theme.
+
+**Only one theme is active at a time**, so two theme mods no longer fight over the cascade — the user
+picks one in View → Theme.
