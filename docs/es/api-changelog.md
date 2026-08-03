@@ -46,6 +46,18 @@ Cuando hay un salto de versión major, este archivo recibe una sección con la n
   escuchando una tecla — combinalo con un botón de toast para mandar al usuario
   directo a reasignar una acción puntual. Aditivo: los mods que nunca configuran
   `action`/`secondaryAction` no ven ningún cambio. Ver [api-reference.md](./api-reference.md) (`ui`).
+- **`ctx.selectors.pickGraphic(..., { allowTileSelect: true })`**. Ofrece **selección de tiles**,
+  pero solo cuando el gráfico elegido es un **tileset** (uno que esté en `Graphics/Tilesets`): la
+  vista previa muestra entonces una cuadrícula de tiles, con clic para elegir uno y arrastre para
+  elegir un bloque. Cualquier otro gráfico no se ve afectado, así que la opción se puede dejar
+  activada sin riesgo. La selección vuelve en `GraphicPickResult.srcRect` como `{ x, y, w, h }` en
+  píxeles de la imagen original —siempre un número entero de tiles de 32px— con `w`/`h` a 0
+  significando la imagen completa (que es también lo que obtienes sin la opción), así que el código
+  existente se lee igual. El editor trata la selección como si *fuera* la imagen completa: la
+  cuadrícula de la hoja la divide y `direction`/`pattern` indexan dentro de ella, y al elegir tiles
+  se ajustan `sheetCols`/`sheetRows`. En el juego necesita el plugin MakerStudio —los gráficos de
+  evento e imagen del propio editor llevan el mismo campo, así que un proyecto con el plugin
+  respeta lo que elegiste.
 
 - **`ctx.theme`** (`ThemeCtx`). Registra temas del editor: `register({ id, name, base, vars?, css?, canvas? })`,
   `apply(id | null)`, `current()`, `list()` y `assetUrl(rutaRelativa)` para convertir un fichero de la
