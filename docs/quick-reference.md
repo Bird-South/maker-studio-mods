@@ -250,6 +250,10 @@ ctx.i18n.onChanged((locale) => { /* re-render */ });   // = bus "locale.changed"
 // automatically when the mod re-registers (hot reload safe).
 ```
 
+Translating the **whole editor**: [app-strings.json](./app-strings.json) lists every English
+source string with empty values — fill it in and pass it as the `dict` above. Entries left `""`
+stay English.
+
 ## View options
 
 ```js
@@ -348,12 +352,14 @@ ctx.events.registerCommand({
   // parse() recovers params so the command stays named + re-editable.
   parse: (t) => { const m = /^pbCameraScrollTo\((-?\d+), (-?\d+)(?:, (\d+))?\)$/.exec(t);
     return m ? { target: { mode: "direct", mapId: 0, x: +m[1], y: +m[2], varMapId: 1, varX: 1, varY: 1 }, useSpeed: m[3] != null, speed: +m[3] || 4 } : null; },
-  summary: (p) => `(${p.target.x}, ${p.target.y})`,
+  // 2nd arg = where the command sits: {mapId, eventId, pageIndex, index, count, indent}.
+  // index === 0 is first, index === count - 1 is last, indent > 0 means nested.
+  summary: (p, ctx) => `(${p.target.x}, ${p.target.y}) #${ctx.index + 1}/${ctx.count}`,
 });
 // Omit `fields` for a freeform script command (params.script).
 // Field types: number, text, select, checkbox, switch, variable,
 //   coordinate (Transfer-Player Direct/Variables source), record (recordKind),
-//   event, graphic (subfolder), audio (category). Any field: disabled/hidden(params).
+//   event, graphic (subfolder), audio (category). Any field: disabled/hidden(params, ctx).
 // Appears on your own named puzzle-icon tab (from `page`) in the picker; stored
 // as a code-355 Script command running the literal text — no runtime dispatcher.
 ```
@@ -412,6 +418,52 @@ ctx.editor.setActiveLayer(0);
 ctx.log.info("Something happened", { detail: "value" });
 ctx.log.warn("Unexpected state");
 ctx.log.error(err);
+```
+
+## Add UI to built-in editor screens
+
+```js
+// Anywhere: matches now AND every element mounted later
+ctx.ui.decorate(".fc-popup .fc-actions", (el) => {
+  const row = document.createElement("label");
+  row.innerHTML = "<input type='checkbox'> Snow on this fog";
+  el.before(row);
+  return () => row.remove();
+});
+
+// Replace a read-only readout with an input
+ctx.ui.decorate(".properties-panel .prop-value", (el) => {
+  const input = document.createElement("input");
+  input.value = el.textContent ?? "";
+  el.replaceWith(input);
+});
+
+// Named slot — same idea, but with ids + setters in the payload
+ctx.ui.registerSlot("event.command.form.101", (host, slot) => {
+  const btn = document.createElement("button");
+  btn.textContent = "Insert greeting";
+  btn.onclick = () => slot.data().setParameter(0, "Hello there!");
+  host.appendChild(btn);
+});
+```
+
+Slots: `fog.config`, `tileset.editor.tile`, `event.command.form[.<code>]`,
+`properties.panel`. `{ replace: true }` hides the built-in content.
+
+## Teach the simulator a Script command
+
+```js
+ctx.simulator.registerScriptHandler("pbSetSwitch", (script, sim) => {
+  const m = script.match(/pbSetSwitch\((\d+),\s*(\w+)\)/);
+  if (!m) return null;                 // decline
+  sim.setSwitch(Number(m[1]), m[2] === "true");
+});
+
+// Also handles move-route Scripts and Script conditional branches
+// (return true/false there). Or claim a whole command code:
+ctx.simulator.registerCommandHandler(201, (params, sim) => {
+  sim.log(`transfer to map ${params[1]}`);
+});
 ```
 
 ## Query installed mods / plugins (runtime)

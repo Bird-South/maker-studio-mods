@@ -8,11 +8,14 @@
  *     and type-checking against `ctx` in their `activate(ctx)` function.
  *
  * Stability rules (paraphrased — see api-changelog.md for version history):
- *   - Adding a new optional field to an interface = MINOR (additive, safe).
+ *   - Adding a new method, event, field, or optional property = PATCH or MINOR
+ *     (additive, safe) — but it still gets its own version number.
  *   - Adding a new required field, removing a field, changing a type = MAJOR.
  *
- * Pin your mod to a specific API version via `manifest.json#apiVersion`. The
- * editor refuses to load a mod whose major version doesn't match its own.
+ * `manifest.json#apiVersion` declares the MINIMUM API your mod needs: the
+ * version that introduced the newest thing it uses. An editor that provides an
+ * older version refuses the mod outright (blocked in the Marketplace, `error` in
+ * the Mod Manager) rather than loading it into a missing-method crash.
  *
  * Sister documents:
  *   - api-reference.md        — narrative reference with examples.
@@ -49,7 +52,8 @@ export interface ModManifest {
    * `index.json` entry. Lowercase `a-z0-9-`, up to 8.
    */
   tags?: string[];
-  /** Editor API version this mod targets (semver). */
+  /** Minimum Mod API this mod needs (semver) — the version that introduced the
+   *  newest API it uses. Older editors refuse to load it. */
   apiVersion: string;
   /** Path to the JS entry file, relative to the mod folder. */
   main: string;
@@ -674,15 +678,38 @@ export interface CoordinateValue {
   varY: number;
 }
 
+/** Where a mod command sits in the editor while its script / summary / field
+ *  callbacks run. Handed to every one of them as a second argument.
+ *
+ *  `index` is the command's flat position in the page's command list — the same
+ *  list `events.getFull().pages[pageIndex].list` returns, so continuation rows
+ *  (401 text lines, 509 move sub-commands…) count as entries. `indent` tells how
+ *  deep it is nested inside conditional branches / loops. */
+export interface ModCommandContext {
+  mapId: number;
+  /** Null in the Database → Common Events editor (no map event). */
+  eventId: number | null;
+  /** Null in the Database → Common Events editor (a common event has no pages). */
+  pageIndex: number | null;
+  /** Flat position in the command list, 0-based. */
+  index: number;
+  /** Entries in the list, trailing code-0 terminator excluded — so `index === 0`
+   *  is first and `index === count - 1` is last. While the command is being
+   *  inserted this describes where it will land, itself included. */
+  count: number;
+  /** Nesting depth (0 at the top level of the page). */
+  indent: number;
+}
+
 /** A declarative field in a mod-defined event command's editor UI. Each type
  *  maps to a native editor control (number box, dropdown, switch/variable
  *  picker, map picker, entity picker, graphic/audio browser…) so the dialog
  *  matches the built-in command dialogs. `disabled` greys the control out, and
  *  `hidden` removes it entirely, based on the current params (e.g. hide "speed"
- *  until a "set speed" box is on). */
+ *  until a "set speed" box is on) or on where the command sits (`ctx`). */
 export type ModCommandField = {
-  disabled?: (params: Record<string, unknown>) => boolean;
-  hidden?: (params: Record<string, unknown>) => boolean;
+  disabled?: (params: Record<string, unknown>, ctx: ModCommandContext) => boolean;
+  hidden?: (params: Record<string, unknown>, ctx: ModCommandContext) => boolean;
 } & (
   | { type: "number"; key: string; label: string; min?: number; max?: number; step?: number; default?: number }
   | { type: "text"; key: string; label: string; default?: string }
@@ -721,14 +748,15 @@ export interface ModCommandDef {
   fields?: ModCommandField[];
   /** Build the Script command text from the params. Stored verbatim and run
    *  in-game directly. Required when `fields` are given; for a fields-less
-   *  command the editor stores `params.script` as-is. */
-  script?: (params: ModCommandParams) => string;
+   *  command the editor stores `params.script` as-is. `ctx` says which event /
+   *  page / position the command is being written at. */
+  script?: (params: ModCommandParams, ctx: ModCommandContext) => string;
   /** Recognize a previously generated script back into params so the command
    *  keeps its name and reopens its custom form. Return null if not this
    *  command. Without it, an inserted command becomes an ordinary Script. */
   parse?: (scriptText: string) => ModCommandParams | null;
   /** Optional one-line summary shown after the name in the command list. */
-  summary?: (params: ModCommandParams) => string;
+  summary?: (params: ModCommandParams, ctx: ModCommandContext) => string;
 }
 
 /** Info passed to advanced overlay render callbacks. */
@@ -1062,6 +1090,93 @@ export interface UiCtx {
    *  listening for a keypress, as if the user had clicked it — e.g. from a toast's
    *  "Assign shortcut" button. Omit it to just open the plain list. */
   openKeyboardShortcuts?(actionId?: string): void;
+  /** Inject UI into a **named extension point inside built-in editor UI** — a
+   *  checkbox in the fog dialog, a field in the Tileset Editor, a button in an
+   *  event command form. See `ModSlotId` for the slots and their payloads.
+   *
+   *  ```js
+   *  ctx.ui.registerSlot("fog.config", (host, slot) => {
+   *    const label = document.createElement("label");
+   *    label.textContent = "My option";
+   *    host.appendChild(label);
+   *    return () => label.remove();          // optional cleanup
+   *  });
+   *  ```
+   *
+   *  Pass `{ replace: true }` to hide the slot's built-in content and render
+   *  only yours — that is how a read-only readout becomes an editable input. */
+  registerSlot?(slot: ModSlotId | string, render: ModSlotRenderer, opts?: ModSlotOptions): Disposable;
+  /** Take over any element of built-in editor UI that matches a CSS selector —
+   *  now **and every one mounted later**, so a dialog opened later is decorated
+   *  the same as one already open. Unlike `registerSlot` this needs no
+   *  extension point in the editor, so it reaches anywhere.
+   *
+   *  ```js
+   *  // A checkbox in every fog dialog
+   *  ctx.ui.decorate(".fc-popup .fc-actions", (el) => {
+   *    const row = document.createElement("label");
+   *    row.innerHTML = "<input type='checkbox'> My option";
+   *    el.before(row);
+   *    return () => row.remove();          // optional cleanup
+   *  });
+   *
+   *  // Turn a read-only readout into an input
+   *  ctx.ui.decorate(".properties-panel .prop-value", (el) => {
+   *    const input = document.createElement("input");
+   *    input.value = el.textContent ?? "";
+   *    el.replaceWith(input);
+   *  });
+   *  ```
+   *
+   *  `[data-ms-part]` (`dialog`, `menubar`, `toolbar`, `statusbar`,
+   *  `panel-header`, `canvas`) is a **stable** contract shared with the theme
+   *  system. Component class names work too, but they are internal and can
+   *  change between releases. */
+  decorate?(selector: string, apply: ModDecorator): Disposable;
+}
+
+/** Runs once per element matching a `ui.decorate` selector. Return a cleanup to
+ *  run when the element is removed or the mod unloads. */
+export type ModDecorator = (el: HTMLElement, info: { selector: string }) => void | (() => void);
+
+// ============================================================================
+// UI extension points (slots)
+// ============================================================================
+
+/** Built-in slot ids. `event.command.form.<code>` also exists, one per RMXP
+ *  command code — `"event.command.form.101"` is the Show Text form. */
+export type ModSlotId =
+  /** Edit Fog / Panorama / layer-group popup, above the footer.
+   *  data: `{ groupKey, mapId, layerId }` */
+  | "fog.config"
+  /** Tileset Editor, under the selected tile's properties.
+   *  data: `{ tilesetId, tileId }` */
+  | "tileset.editor.tile"
+  /** Every event command parameter form, above the footer.
+   *  data: `{ code, parameters, setParameter(index, value) }` */
+  | "event.command.form"
+  /** Properties panel body — wraps the built-in rows, so `replace` swaps them.
+   *  data: `{ mapId, x, y, tileId }` */
+  | "properties.panel";
+
+export interface ModSlotHost {
+  /** The slot this render call is for. */
+  slot: string;
+  /** The slot's live payload. **Call it every time** — one host element is
+   *  reused across re-renders, so a cached value goes stale. */
+  data(): Record<string, unknown>;
+  /** Runs whenever the payload changes. Returns an unsubscribe. */
+  onUpdate(fn: () => void): () => void;
+}
+
+/** Renders into `host`. Return a cleanup to run when the slot goes away. */
+export type ModSlotRenderer = (host: HTMLElement, slot: ModSlotHost) => void | (() => void);
+
+export interface ModSlotOptions {
+  /** Hide the slot's built-in content and show only this mod's. */
+  replace?: boolean;
+  /** Sort order among a slot's registrations (default 0). */
+  order?: number;
 }
 
 export interface ContextMenuItemDef {
@@ -1740,7 +1855,90 @@ export interface ModContext {
   mods: ModsCtx;
   /** Query installed Essentials plugins (under `<gameRoot>/Plugins/`) at runtime. */
   plugins: PluginsCtx;
+  /** Teach the Game Simulator behaviour it does not have — Script commands
+   *  above all. */
+  simulator: SimulatorCtx;
 }
+
+// ============================================================================
+// Simulator extensions
+// ============================================================================
+
+/** A character in the running simulation. Positions are tile coords. */
+export interface SimCharacterView {
+  /** -1 for the player, else the event id. */
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  direction: 2 | 4 | 6 | 8;
+  moving: boolean;
+  erased: boolean;
+  setPosition(x: number, y: number): void;
+  setDirection(dir: 2 | 4 | 6 | 8): void;
+  setTransparent(on: boolean): void;
+  setThrough(on: boolean): void;
+}
+
+/** The running simulation, as a handler sees it. */
+export interface SimApi {
+  /** Sim frame counter. */
+  frame: number;
+  /** Event running the command — null for the main scenario, -1 for the player. */
+  eventId: number | null;
+  mapId: number;
+  getSwitch(id: number): boolean;
+  setSwitch(id: number, value: boolean): void;
+  getVariable(id: number): number;
+  setVariable(id: number, value: number): void;
+  /** Self switch of `eventId` (defaults to the event running the command). */
+  getSelfSwitch(letter: string, eventId?: number): boolean;
+  setSelfSwitch(letter: string, value: boolean, eventId?: number): void;
+  /** -1 player, 0 the event running the command, else an event id. */
+  character(target: number): SimCharacterView | null;
+  characters(): SimCharacterView[];
+  /** Hold the interpreter for `frames` sim frames before the next command. */
+  wait(frames: number): void;
+  /** Show a message box, exactly as Show Text does. */
+  showText(lines: string[]): void;
+  /** Append a row to the simulator's log panel. */
+  log(message: string, level?: "info" | "warn" | "unsupported"): void;
+}
+
+/** Runs a Script. Return a boolean to answer a Script conditional branch;
+ *  return `null` to decline so the next handler (or the built-in "unsupported"
+ *  path) takes it. Anything else counts as handled. */
+export type SimScriptHandler = (script: string, api: SimApi) => boolean | void | null;
+
+/** Runs an event command. Return `false` to decline and fall through. */
+export type SimCommandHandler = (parameters: unknown[], api: SimApi) => boolean | void;
+
+export interface SimulatorCtx {
+  /**
+   * Claim Script bodies the simulator cannot run: the Script command (355), a
+   * move-route Script (move code 45) and a Script conditional branch (kind 12).
+   *
+   * `match` narrows what reaches the handler — a string matches scripts that
+   * START with it, a RegExp is tested against the whole body, a predicate does
+   * whatever you want. Omit it to see every script.
+   *
+   * ```js
+   * ctx.simulator.registerScriptHandler("pbSetSwitch", (script, sim) => {
+   *   const [, id, val] = script.match(/pbSetSwitch\((\d+),\s*(\w+)\)/) ?? [];
+   *   if (!id) return null;                  // decline — not ours after all
+   *   sim.setSwitch(Number(id), val === "true");
+   * });
+   * ```
+   */
+  registerScriptHandler(
+    match: string | RegExp | ((script: string) => boolean) | undefined,
+    handler: SimScriptHandler,
+  ): Disposable;
+  /** Implement (or override) an event command code in the simulator. Mod
+   *  handlers run BEFORE the built-in implementation. */
+  registerCommandHandler(code: number, handler: SimCommandHandler): Disposable;
+}
+
 
 // ============================================================================
 // Mod module shape

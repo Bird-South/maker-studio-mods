@@ -250,6 +250,10 @@ ctx.i18n.onChanged((locale) => { /* re-renderizar */ });   // = bus "locale.chan
 // automáticamente cuando el mod se re-registra (seguro ante hot reload).
 ```
 
+Traducir el **editor entero**: [app-strings.json](../app-strings.json) lista todas las cadenas
+fuente en inglés con los valores vacíos — rellénalo y pásalo como el `dict` de arriba. Las
+entradas que queden en `""` se muestran en inglés.
+
 ## Opciones de vista
 
 ```js
@@ -345,12 +349,14 @@ ctx.events.registerCommand({
   // parse() recupera los params para que el comando siga con nombre + reeditable.
   parse: (t) => { const m = /^pbCameraScrollTo\((-?\d+), (-?\d+)(?:, (\d+))?\)$/.exec(t);
     return m ? { target: { mode: "direct", mapId: 0, x: +m[1], y: +m[2], varMapId: 1, varX: 1, varY: 1 }, useSpeed: m[3] != null, speed: +m[3] || 4 } : null; },
-  summary: (p) => `(${p.target.x}, ${p.target.y})`,
+  // 2º arg = dónde está el comando: {mapId, eventId, pageIndex, index, count, indent}.
+  // index === 0 es el primero, index === count - 1 el último, indent > 0 es anidado.
+  summary: (p, ctx) => `(${p.target.x}, ${p.target.y}) #${ctx.index + 1}/${ctx.count}`,
 });
 // Omite `fields` para un comando de script libre (params.script).
 // Tipos de campo: number, text, select, checkbox, switch, variable,
 //   coordinate (fuente Direct/Variables de Transfer-Player), record (recordKind),
-//   event, graphic (subcarpeta), audio (categoría). Cualquier campo: disabled/hidden(params).
+//   event, graphic (subcarpeta), audio (categoría). Cualquier campo: disabled/hidden(params, ctx).
 // Aparece en tu propia pestaña con nombre (desde `page`) con icono de puzle en el picker; se
 // guarda como comando Script código-355 que corre el texto literal — sin dispatcher de runtime.
 ```
@@ -409,6 +415,52 @@ ctx.editor.setActiveLayer(0);
 ctx.log.info("Something happened", { detail: "value" });
 ctx.log.warn("Unexpected state");
 ctx.log.error(err);
+```
+
+## Añadir interfaz a pantallas ya existentes del editor
+
+```js
+// En cualquier sitio: casa ahora Y con todo lo que se monte después
+ctx.ui.decorate(".fc-popup .fc-actions", (el) => {
+  const row = document.createElement("label");
+  row.innerHTML = "<input type='checkbox'> Nieve en esta fog";
+  el.before(row);
+  return () => row.remove();
+});
+
+// Sustituir un valor de solo lectura por un campo editable
+ctx.ui.decorate(".properties-panel .prop-value", (el) => {
+  const input = document.createElement("input");
+  input.value = el.textContent ?? "";
+  el.replaceWith(input);
+});
+
+// Slot con nombre: lo mismo, pero con ids y setters en el payload
+ctx.ui.registerSlot("event.command.form.101", (host, slot) => {
+  const btn = document.createElement("button");
+  btn.textContent = "Insertar saludo";
+  btn.onclick = () => slot.data().setParameter(0, "Hola!");
+  host.appendChild(btn);
+});
+```
+
+Slots: `fog.config`, `tileset.editor.tile`, `event.command.form[.<code>]`,
+`properties.panel`. `{ replace: true }` oculta el contenido propio del slot.
+
+## Enseñar un comando Script al simulador
+
+```js
+ctx.simulator.registerScriptHandler("pbSetSwitch", (script, sim) => {
+  const m = script.match(/pbSetSwitch\((\d+),\s*(\w+)\)/);
+  if (!m) return null;                 // renuncia
+  sim.setSwitch(Number(m[1]), m[2] === "true");
+});
+
+// También cubre los Script de ruta de movimiento y las condiciones de tipo
+// Script (ahí devuelve true/false). O quédate un código entero:
+ctx.simulator.registerCommandHandler(201, (params, sim) => {
+  sim.log(`transfer to map ${params[1]}`);
+});
 ```
 
 ## Consultar mods / plugins instalados (runtime)

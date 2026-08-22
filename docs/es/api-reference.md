@@ -1,6 +1,8 @@
 # Referencia de la API
 
-La versión actual de la API es **1.0.0**. Los mods la declaran vía `manifest.apiVersion`.
+La versión actual de la API es **1.0.1**. Los mods declaran vía `manifest.apiVersion` la versión que
+introdujo lo más nuevo que usan — un editor más antiguo rechaza un mod que pide más de lo que ofrece.
+Consulta [api-changelog.md](api-changelog.md) para ver qué entró en cada versión.
 
 La fuente de verdad en TypeScript es [`mod-api.d.ts`](../mod-api.d.ts).
 Este documento refleja ese archivo.
@@ -908,9 +910,9 @@ interface ModCommandDef {
   page?: string;                           // título de la pestaña del selector (los comandos que lo comparten se agrupan; por defecto el id del mod)
   pageDescription?: string;                // franja de una línea bajo la pestaña activa
   fields?: ModCommandField[];              // omitir → textarea de script libre (params.script)
-  script?: (params: ModCommandParams) => string;  // el Ruby almacenado y ejecutado en el juego
+  script?: (params: ModCommandParams, ctx: ModCommandContext) => string;  // el Ruby almacenado y ejecutado en el juego
   parse?: (scriptText: string) => ModCommandParams | null;  // recupera params para reeditar
-  summary?: (params: ModCommandParams) => string; // etiqueta de una línea en la lista de comandos
+  summary?: (params: ModCommandParams, ctx: ModCommandContext) => string; // etiqueta de una línea en la lista de comandos
 }
 ```
 
@@ -928,8 +930,41 @@ pestaña con el nombre del id de tu mod.
 **Campos declarativos** (`def.fields`) se renderizan con los propios controles y selectors del
 editor, de modo que el diálogo coincide con los diálogos de comando incluidos. El `key` de cada
 campo se convierte en una propiedad del objeto `params` que se pasa a `script`, `parse` y
-`summary`. Cualquier campo puede definir `disabled: (params) => boolean` para grisear su control, o
-`hidden: (params) => boolean` para eliminarlo por completo, condicionalmente.
+`summary`. Cualquier campo puede definir `disabled: (params, ctx) => boolean` para grisear su
+control, o `hidden: (params, ctx) => boolean` para eliminarlo por completo, condicionalmente.
+
+**Dónde está colocado el comando** (`ctx`) — `script`, `summary` y los predicados
+`disabled`/`hidden` de los campos reciben un segundo argumento que describe el sitio que ocupa el
+comando dentro del evento:
+
+```ts
+interface ModCommandContext {
+  mapId: number;
+  eventId: number | null;    // null en Base de datos → Eventos comunes
+  pageIndex: number | null;  // null en Base de datos → Eventos comunes
+  index: number;             // posición plana en la lista de comandos de la página, base 0
+  count: number;             // entradas de la lista, sin contar el terminador final
+  indent: number;            // profundidad de anidamiento (0 en el nivel superior de la página)
+}
+```
+
+Así, `ctx.index === 0` es el primer comando y `ctx.index === ctx.count - 1` el último;
+`ctx.indent > 0` significa que está dentro de una condición o un bucle. La granularidad de
+`index`/`count` coincide con `events.getFull().pages[pageIndex].list`, así que las filas de
+continuación (líneas de texto 401, sub-comandos de movimiento 509…) cuentan como entradas.
+Mientras se está insertando el comando, el contexto describe el sitio en el que va a caer,
+incluyéndose a sí mismo en `count`. Ambos callbacks se vuelven a ejecutar cada vez que el editor
+relee el comando, así que un comando movido vuelve a renderizar su resumen con la nueva posición
+— pero el **Ruby almacenado solo se reescribe al editar el formulario**: arrastrar un comando a
+otro sitio no vuelve a ejecutar `script`.
+
+```js
+// El mismo comando genera Ruby distinto según dónde se haya soltado.
+script: (p, ctx) => ctx.index === 0
+  ? `pbSceneStart(${p.id | 0})`
+  : `pbSceneStep(${p.id | 0})`,
+summary: (p, ctx) => `página ${(ctx.pageIndex ?? 0) + 1}, #${ctx.index + 1}/${ctx.count}`,
+```
 
 | `type`     | Renderiza | Valor almacenado |
 |------------|-----------|------------------|
@@ -1372,6 +1407,157 @@ no puede apuntar a un atajo registrado por otro mod.
 
 ---
 
+### Extender la interfaz del editor
+
+Dos mecanismos, el general primero.
+
+#### `ui.decorate(selector, apply)` — en cualquier sitio
+
+```ts
+const d = ctx.ui.decorate(".fc-popup .fc-actions", (el, info) => {
+  const row = document.createElement("label");
+  row.innerHTML = "<input type='checkbox'> Nieve en esta fog";
+  el.before(row);
+  return () => row.remove();   // limpieza opcional
+});
+```
+
+Tu callback se ejecuta para **todos los elementos que casen con el selector: los que ya están en
+pantalla y todos los que se monten después**. Si abres el diálogo de Edit Fog dentro de cinco
+minutos, se decora igual que uno que ya estuviera abierto. A partir de ahí tienes un
+`HTMLElement` real: añádele cosas, cámbiale el estilo, engancha listeners o sustitúyelo entero
+con `replaceWith()`.
+
+```ts
+// Convertir un valor de solo lectura en un campo editable
+ctx.ui.decorate(".properties-panel .prop-value", (el) => {
+  const input = document.createElement("input");
+  input.value = el.textContent ?? "";
+  el.replaceWith(input);
+});
+```
+
+Notas:
+
+- El valor devuelto es una limpieza; se ejecuta cuando el elemento sale del DOM **o** cuando se
+  descarta el decorador. Todo lo que hayas añadido debería quitarse ahí.
+- Cada elemento se decora una sola vez por decorador, así que los re-renders nunca duplican nada.
+- Todo se descarta automáticamente al descargar el mod / recargar en caliente.
+- Un único `MutationObserver` da servicio a todos los decoradores y **solo está conectado
+  mientras haya al menos uno registrado**: si tu mod no usa `decorate`, no cuesta nada.
+
+**Elegir un selector.** `[data-ms-part]` es un contrato estable y documentado, compartido con el
+sistema de temas: `dialog`, `menubar`, `toolbar`, `statusbar`, `panel-header`, `canvas`. Los
+nombres de clase de los componentes (`.fc-popup`, `.cpf-body`, `.ts-sidebar-section`,
+`.prop-value`, …) también funcionan y son los que más usarás, pero son **internos** y pueden
+cambiar entre versiones.
+
+#### `ui.registerSlot(slot, render, opts?)` — puntos con nombre y datos
+
+```ts
+ctx.ui.registerSlot("event.command.form.101", (host, slot) => {
+  const btn = document.createElement("button");
+  btn.textContent = "Insertar saludo";
+  btn.onclick = () => slot.data().setParameter(0, "Hola!");
+  host.appendChild(btn);
+});
+```
+
+Los slots son los pocos puntos que el editor declara explícitamente, y su ventaja frente a
+`decorate` es el **payload**: ids y setters que el DOM no puede darte.
+
+| Slot | Dónde | `slot.data()` |
+|------|-------|---------------|
+| `fog.config` | popup de Edit Fog / Panorama / grupo de capas, encima del footer | `{ groupKey, mapId, layerId }` |
+| `tileset.editor.tile` | barra lateral del Tileset Editor | `{ tilesetId, mode, hoverCell, selectedCells }` |
+| `event.command.form` | todos los formularios de comando de evento | `{ code, parameters, setParameter(i, v) }` |
+| `event.command.form.<code>` | un formulario concreto (`.101` = Show Text) | igual |
+| `properties.panel` | cuerpo del panel Tile Info | `{ tileId, tilesetId, priority, terrainTag, passable, isBush, isCounter }` |
+
+- `slot.data()` es un **getter**: el elemento host se reutiliza entre re-renders, así que llámalo
+  cada vez en lugar de cachearlo. `slot.onUpdate(fn)` se dispara cuando cambia el payload.
+- `{ replace: true }` oculta el contenido propio del slot y muestra solo el tuyo.
+- `{ order: n }` ordena varios registros en el mismo slot.
+
+Ejemplo completo de los dos mecanismos juntos: [`script-bridge`](../../examples/mods/script-bridge/).
+
+---
+
+## `simulator`
+
+El Game Simulator interpreta un subconjunto útil de RMXP. Lo que no puede ejecutar — sobre todo
+los comandos Script, que son Ruby y aquí no hay Ruby — se registra como no soportado. Estos
+hooks permiten que tu mod aporte lo que falta.
+
+```ts
+// Encargarse de un comando Script (355), de un Script dentro de una ruta de
+// movimiento (move code 45) o de una condición de tipo Script (kind 12).
+ctx.simulator.registerScriptHandler("pbSetSwitch", (script, sim) => {
+  const m = script.match(/pbSetSwitch\((\d+),\s*(\w+)\)/);
+  if (!m) return null;                       // renuncia: que lo intente otro
+  sim.setSwitch(Number(m[1]), m[2] === "true");
+});
+
+// Implementar (o sustituir) un código de comando de evento.
+ctx.simulator.registerCommandHandler(201, (params, sim) => {
+  sim.log(`transfer to map ${params[1]}`);
+});
+```
+
+`match` filtra lo que llega a un handler de script: un **string** casa con los scripts que
+*empiezan* por él, una **RegExp** se prueba contra todo el cuerpo, un **predicado** hace lo que
+quieras, y si lo omites lo ves todo.
+
+| Devuelve | Significado |
+|----------|-------------|
+| `null` | Renuncia — lo coge el siguiente handler (y luego el camino interno) |
+| `true` / `false` | La respuesta de una **condición de tipo Script**; también cuenta como atendido |
+| cualquier otra cosa | Atendido |
+
+Los handlers de `registerCommandHandler` se ejecutan **antes** que la implementación interna, así
+que puedes sustituir un código que el simulador ya soporta; devuelve `false` para renunciar.
+
+### `SimApi`
+
+El segundo argumento es una vista reducida de la simulación en marcha; el runtime interno nunca
+se expone.
+
+```ts
+interface SimApi {
+  frame: number;                  // contador de frames del simulador
+  eventId: number | null;         // evento que ejecuta el comando (-1 = jugador)
+  mapId: number;
+  getSwitch(id): boolean;         setSwitch(id, value): void;
+  getVariable(id): number;        setVariable(id, value): void;
+  getSelfSwitch(letter, eventId?): boolean;
+  setSelfSwitch(letter, value, eventId?): void;
+  character(target): SimCharacterView | null;   // -1 jugador, 0 este evento, N id de evento
+  characters(): SimCharacterView[];
+  wait(frames): void;             // detiene el intérprete
+  showText(lines): void;          // caja de mensaje, como Show Text
+  log(message, level?): void;     // una fila en el panel de log del simulador
+}
+
+interface SimCharacterView {
+  id: number; name: string; x: number; y: number;
+  direction: 2 | 4 | 6 | 8; moving: boolean; erased: boolean;
+  setPosition(x, y): void; setDirection(dir): void;
+  setTransparent(on): void; setThrough(on): void;
+}
+```
+
+Los cambios de switch y variable se aplican en el siguiente tick, cuando el simulador reevalúa
+las condiciones de página. Si un handler lanza una excepción se captura, se registra en el panel
+del simulador y cuenta como atendido, así que un mod roto no puede bloquear la simulación. Todos
+los handlers se descartan al descargar el mod.
+
+Mira el mod de ejemplo [`script-bridge`](../../examples/mods/script-bridge/): registra un handler
+para una tabla de one-liners de Ruby habituales, implementa Change Gold y marca las filas Script
+que puede ejecutar — un ejemplo completo de `ctx.simulator` junto a `ui.decorate` y
+`ui.registerSlot`.
+
+---
+
 ## `keybinds`
 
 ```ts
@@ -1456,6 +1642,30 @@ Detalles:
 - Los cambios de locale disparan el evento del bus `"locale.changed"` (`{ locale }`) —
   `i18n.onChanged` es el wrapper de conveniencia. Consulta
   [events-reference.md](events-reference.md).
+
+### Traducir el editor entero — `app-strings.json`
+
+Cada cadena fuente en inglés que el editor pasa por `t()` está exportada en
+**[app-strings.json](../app-strings.json)** — ordenada alfabéticamente, con los valores vacíos,
+lista para rellenar. Un mod de traducción es ese archivo con los valores rellenados y pasado a
+`registerLocale`:
+
+```js
+import fr from "./app-strings.fr.json";
+
+export function activate(ctx) {
+  ctx.i18n.registerLocale({ code: "fr", name: "Français", dict: fr });
+}
+```
+
+- Las entradas que dejes como `""` caen a inglés, así que puedes publicar traducciones parciales
+  sin terminarlo todo.
+- Los placeholders `{name}` deben sobrevivir en tu traducción (se sustituyen después de la
+  búsqueda); reordena las palabras que los rodean libremente, pero mantén las llaves literales.
+- El archivo se regenera en cada release del editor. Diferéncialo con tu dict para encontrar las
+  cadenas nuevas — las claves que desaparecen simplemente se ignoran.
+- Para corregir o ampliar un idioma existente en lugar de añadir uno, usa `registerLocale` con ese
+  code (`"es"`, `"en"`) y solo las claves que cambias.
 
 ---
 

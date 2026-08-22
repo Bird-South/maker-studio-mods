@@ -1,6 +1,8 @@
 # API Reference
 
-The current API version is **1.0.0**. Mods declare it via `manifest.apiVersion`.
+The current API version is **1.0.1**. Mods declare via `manifest.apiVersion` the version that
+introduced the newest thing they use — an older editor refuses a mod that asks for more than it
+provides. See [api-changelog.md](./api-changelog.md) for what landed in each version.
 
 The TypeScript source of truth is [`mod-api.d.ts`](./mod-api.d.ts).
 This document mirrors that file.
@@ -27,7 +29,7 @@ All mod capabilities are reached through it.
 | `tools`      | `ToolsCtx`            | Register custom editing tools. |
 | `menu`       | `MenuCtx`             | Add menu items. |
 | `commands`   | `CommandsCtx`         | Cross-mod command registry. |
-| `ui`         | `UiCtx`               | Panels, dialogs, toasts. |
+| `ui`         | `UiCtx`               | Panels, dialogs, toasts, and injecting UI into built-in editor screens. |
 | `bus`        | `BusCtx`              | Subscribe to / emit events. |
 | `fs`         | `FsCtx`               | Path-scoped filesystem. |
 | `storage`    | `StorageCtx`          | Per-mod persistent K/V. |
@@ -39,6 +41,7 @@ All mod capabilities are reached through it.
 | `projectData`| `ProjectDataCtx`      | Read-only RPG record lists (actors, items, switches, …). |
 | `mods`       | `ModsCtx`             | Query other installed mods (presence, status). |
 | `plugins`    | `PluginsCtx`          | Query installed Essentials plugins. |
+| `simulator`  | `SimulatorCtx`        | Teach the Game Simulator Script commands and unimplemented codes. |
 | `log`        | `LogCtx`              | Namespaced logger. |
 | `lifecycle`  | `LifecycleCtx`        | Activation hooks. |
 
@@ -908,9 +911,9 @@ interface ModCommandDef {
   page?: string;                           // picker tab title (commands sharing it group together; falls back to the mod id)
   pageDescription?: string;                // one-line strip shown beneath the active tab
   fields?: ModCommandField[];              // omit → freeform script textarea (params.script)
-  script?: (params: ModCommandParams) => string;  // the Ruby stored & run in-game
+  script?: (params: ModCommandParams, ctx: ModCommandContext) => string;  // the Ruby stored & run in-game
   parse?: (scriptText: string) => ModCommandParams | null;  // recover params to re-edit
-  summary?: (params: ModCommandParams) => string; // one-line label in the command list
+  summary?: (params: ModCommandParams, ctx: ModCommandContext) => string; // one-line label in the command list
 }
 ```
 
@@ -928,8 +931,42 @@ commands group under a tab labelled with your mod id.
 **Declarative fields** (`def.fields`) render with the editor's own controls and
 selectors, so the dialog matches the built-in command dialogs. Each field's
 `key` becomes a property on the `params` object passed to `script`, `parse`, and
-`summary`. Any field may set `disabled: (params) => boolean` to grey its control
-out, or `hidden: (params) => boolean` to remove it entirely, conditionally.
+`summary`. Any field may set `disabled: (params, ctx) => boolean` to grey its
+control out, or `hidden: (params, ctx) => boolean` to remove it entirely,
+conditionally.
+
+**Where the command sits** (`ctx`) — `script`, `summary` and the field
+`disabled`/`hidden` predicates all receive a second argument describing the
+command's place in the event:
+
+```ts
+interface ModCommandContext {
+  mapId: number;
+  eventId: number | null;    // null in Database → Common Events
+  pageIndex: number | null;  // null in Database → Common Events
+  index: number;             // flat position in the page's command list, 0-based
+  count: number;             // entries in the list, trailing terminator excluded
+  indent: number;            // nesting depth (0 at the page's top level)
+}
+```
+
+So `ctx.index === 0` is the first command and `ctx.index === ctx.count - 1` the
+last; `ctx.indent > 0` means it sits inside a conditional branch or loop. The
+`index`/`count` granularity matches `events.getFull().pages[pageIndex].list`, so
+continuation rows (401 text lines, 509 move sub-commands…) count as entries.
+While the command is being inserted the context describes the spot it is about
+to land on, itself included in `count`. Both callbacks re-run whenever the
+editor re-reads the command, so a moved command re-renders its summary with the
+new position — but the **stored Ruby is only written when the form is edited**:
+dragging a command elsewhere does not re-run `script`.
+
+```js
+// Same command, different Ruby depending on where it was dropped.
+script: (p, ctx) => ctx.index === 0
+  ? `pbSceneStart(${p.id | 0})`
+  : `pbSceneStep(${p.id | 0})`,
+summary: (p, ctx) => `page ${(ctx.pageIndex ?? 0) + 1}, #${ctx.index + 1}/${ctx.count}`,
+```
 
 | `type`     | Renders | Stored value |
 |------------|---------|--------------|
@@ -1372,6 +1409,170 @@ clicked it — pairs well with a toast [action button](#toast-action-buttons) of
 "Assign shortcut" for an action that doesn't have one yet. Only matches the built-in action
 ids `ctx.keybinds` knows about — it can't target a mod-registered menu shortcut.
 
+### Extending built-in editor UI
+
+Two ways in, and you want the first one most of the time.
+
+#### `ui.decorate(selector, apply)` — anywhere
+
+```ts
+const d = ctx.ui.decorate(".fc-popup .fc-actions", (el, info) => {
+  const row = document.createElement("label");
+  row.innerHTML = "<input type='checkbox'> Snow on this fog";
+  el.before(row);
+  return () => row.remove();   // optional cleanup
+});
+```
+
+Your callback runs for **every element matching the selector — the ones on screen now, and
+every one mounted later**. Open the Edit Fog dialog five minutes from now and it is decorated
+the same as one already open. From there you hold a real `HTMLElement`: append to it, restyle
+it, wire listeners, or `replaceWith()` it entirely.
+
+```ts
+// Turn a read-only readout into an editable input
+ctx.ui.decorate(".properties-panel .prop-value", (el) => {
+  const input = document.createElement("input");
+  input.value = el.textContent ?? "";
+  el.replaceWith(input);
+});
+
+// A button in the Show Text command form that fills the field in
+ctx.ui.decorate(".cpf-body textarea", (el) => {
+  const btn = document.createElement("button");
+  btn.textContent = "Insert player name";
+  btn.onclick = () => { (el as HTMLTextAreaElement).value += "\PN"; };
+  el.after(btn);
+  return () => btn.remove();
+});
+```
+
+Notes:
+
+- Return value is a cleanup, run when the element leaves the DOM **or** the decorator is
+  disposed. Anything you appended should be removed there.
+- Each element is decorated once per decorator, so re-renders never stack duplicates.
+- Everything is disposed automatically on mod unload / hot reload.
+- One `MutationObserver` backs every decorator and is **only connected while at least one is
+  registered** — mods that never call `decorate` cost nothing.
+
+**Picking a selector.** `[data-ms-part]` is a stable, documented contract shared with the
+theme system: `dialog`, `menubar`, `toolbar`, `statusbar`, `panel-header`, `canvas`.
+Component class names (`.fc-popup`, `.cpf-body`, `.ts-sidebar-section`, `.prop-value`, …)
+work too and are what you'll reach for most, but they are **internal** and can change
+between releases — pin your mod's compatibility accordingly, and prefer a selector that will
+fail visibly over one that silently matches the wrong thing.
+
+#### `ui.registerSlot(slot, render, opts?)` — named points, with data
+
+```ts
+ctx.ui.registerSlot("event.command.form.101", (host, slot) => {
+  const btn = document.createElement("button");
+  btn.textContent = "Insert greeting";
+  btn.onclick = () => {
+    const { setParameter } = slot.data() as { setParameter(i: number, v: unknown): void };
+    setParameter(0, "Hello there!");
+  };
+  host.appendChild(btn);
+});
+```
+
+Slots are the few places the editor declares explicitly, and their advantage over `decorate`
+is the **payload**: ids and setters the DOM cannot give you.
+
+| Slot | Where | `slot.data()` |
+|------|-------|---------------|
+| `fog.config` | Edit Fog / Panorama / layer-group popup, above the footer | `{ groupKey, mapId, layerId }` |
+| `tileset.editor.tile` | Tileset Editor sidebar | `{ tilesetId, mode, hoverCell, selectedCells }` |
+| `event.command.form` | every event command form | `{ code, parameters, setParameter(i, v) }` |
+| `event.command.form.<code>` | one command form (e.g. `.101` = Show Text) | same |
+| `properties.panel` | Tile Info panel body | `{ tileId, tilesetId, priority, terrainTag, passable, isBush, isCounter }` |
+
+- `slot.data()` is a **getter** — one host element is reused across re-renders, so call it
+  each time instead of caching. `slot.onUpdate(fn)` fires when the payload changes.
+- `{ replace: true }` hides the slot's built-in content and shows only yours (`properties.panel`
+  wraps its rows, so this swaps the whole readout).
+- `{ order: n }` sorts multiple registrations on the same slot.
+
+Worked example of both mechanisms side by side: [`script-bridge`](../examples/mods/script-bridge/).
+
+
+---
+
+## `simulator`
+
+The Game Simulator interprets a useful subset of RMXP. What it cannot run — Script commands
+above all, since those are Ruby and there is no Ruby here — is logged as unsupported. These
+hooks let your mod supply the missing behaviour.
+
+```ts
+// Claim a Script command (355), a move-route Script (move code 45),
+// or a Script conditional branch (kind 12).
+ctx.simulator.registerScriptHandler("pbSetSwitch", (script, sim) => {
+  const m = script.match(/pbSetSwitch\((\d+),\s*(\w+)\)/);
+  if (!m) return null;                       // decline — let others try
+  sim.setSwitch(Number(m[1]), m[2] === "true");
+});
+
+// Implement (or override) an event command code.
+ctx.simulator.registerCommandHandler(201, (params, sim) => {
+  sim.log(`transfer to map ${params[1]}`);
+});
+```
+
+`match` narrows what reaches a script handler: a **string** matches scripts that *start* with
+it, a **RegExp** is tested against the whole body, a **predicate** does whatever you want,
+and omitting it sees every script.
+
+Return values:
+
+| Return | Meaning |
+|--------|---------|
+| `null` | Declined — the next handler (then the built-in path) takes it |
+| `true` / `false` | The answer for a **Script conditional branch**; also counts as handled |
+| anything else | Handled |
+
+`registerCommandHandler` handlers run **before** the built-in implementation, so a code the
+simulator already supports can be replaced; return `false` to decline and fall through.
+
+### `SimApi`
+
+The second argument is a narrow view of the running simulation — the internal runtime is
+never handed out.
+
+```ts
+interface SimApi {
+  frame: number;                  // sim frame counter
+  eventId: number | null;         // event running the command (-1 = player)
+  mapId: number;
+  getSwitch(id): boolean;         setSwitch(id, value): void;
+  getVariable(id): number;        setVariable(id, value): void;
+  getSelfSwitch(letter, eventId?): boolean;
+  setSelfSwitch(letter, value, eventId?): void;
+  character(target): SimCharacterView | null;   // -1 player, 0 this event, N event id
+  characters(): SimCharacterView[];
+  wait(frames): void;             // hold the interpreter
+  showText(lines): void;          // message box, like Show Text
+  log(message, level?): void;     // a row in the simulator log panel
+}
+
+interface SimCharacterView {
+  id: number; name: string; x: number; y: number;
+  direction: 2 | 4 | 6 | 8; moving: boolean; erased: boolean;
+  setPosition(x, y): void; setDirection(dir): void;
+  setTransparent(on): void; setThrough(on): void;
+}
+```
+
+Switch / variable writes take effect on the next tick, when the simulator re-evaluates page
+conditions. A handler that throws is caught, logged to the simulator panel and counted as
+handled, so a broken mod cannot wedge the simulation. Every handler is disposed on mod
+unload.
+
+See the [`script-bridge`](../examples/mods/script-bridge/) example mod: it registers one handler
+for a table of common Ruby one-liners, implements Change Gold, and badges the Script rows it can
+run — a worked example of `ctx.simulator` together with `ui.decorate` and `ui.registerSlot`.
+
 ---
 
 ## `keybinds`
@@ -1458,6 +1659,29 @@ Details:
 - Locale switches fire the `"locale.changed"` bus event (`{ locale }`) —
   `i18n.onChanged` is the convenience wrapper. See
   [events-reference.md](./events-reference.md).
+
+### Translating the whole editor — `app-strings.json`
+
+Every English source string the editor runs through `t()` is exported to
+**[app-strings.json](./app-strings.json)** — sorted alphabetically, with empty values, ready to
+fill in. A translation mod is that file with the values filled and handed to `registerLocale`:
+
+```js
+import fr from "./app-strings.fr.json";
+
+export function activate(ctx) {
+  ctx.i18n.registerLocale({ code: "fr", name: "Français", dict: fr });
+}
+```
+
+- Entries left as `""` fall back to English, so partial translations ship fine — no need to
+  finish all of it before releasing.
+- `{name}` placeholders must survive into your translation (they're substituted after lookup);
+  reorder the surrounding words freely, keep the braces literal.
+- The file is regenerated each editor release. Diff it against your dict to find new strings —
+  keys that disappeared are simply ignored.
+- To fix or extend an existing language instead of adding one, `registerLocale` with that code
+  (`"es"`, `"en"`) and only the keys you're changing.
 
 ---
 
